@@ -1,0 +1,117 @@
+id: gcp_citibike_scheduled
+namespace: dtc-de-capstone-project
+
+variables:
+  extraction_month: "{{ trigger.date | date('yyyyMM') }}"
+  file_prefix: "{{ vars.extraction_month }}-citibike-tripdata"
+  gcs_folder: "gs://{{ kv('GCP_BUCKET_NAME') }}/citibike/{{ vars.extraction_month }}/"
+  # Define full table paths here to avoid typos
+  main_table: "{{ kv('GCP_PROJECT_ID') }}.{{ kv('GCP_DATASET') }}.citibike_tripdata"
+  ext_table: "{{ kv('GCP_PROJECT_ID') }}.{{ kv('GCP_DATASET') }}.citibike_trips_{{ vars.extraction_month }}_ext"
+
+tasks:
+  - id: set_labels
+    type: io.kestra.plugin.core.execution.Labels
+    labels:
+      extraction_month: "{{ render(vars.extraction_month) }}"
+
+  - id: extract
+    type: io.kestra.plugin.scripts.shell.Commands
+    outputFiles:
+      - "*.csv"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    commands:
+      - apt-get update -qy && apt-get install -y unzip
+      - wget -qO data.zip https://s3.amazonaws.com/tripdata/{{ render(vars.file_prefix) }}.zip
+      - unzip data.zip
+
+  - id: upload_to_gcs
+    type: io.kestra.plugin.core.flow.ForEach
+    values: "{{ outputs.extract.outputFiles | keys }}"
+    tasks:
+      - id: upload_individual_file
+        type: io.kestra.plugin.gcp.gcs.Upload
+        from: "{{ outputs.extract.outputFiles[taskrun.value] }}"
+        to: "{{ render(vars.gcs_folder) }}{{ taskrun.value }}"
+
+  - id: bq_create_main_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE TABLE IF NOT EXISTS `{{ render(vars.main_table) }}`
+      (
+          ride_id STRING,
+          rideable_type STRING,
+          started_at TIMESTAMP,
+          ended_at TIMESTAMP,
+          start_station_name STRING,
+          start_station_id STRING,
+          end_station_name STRING,
+          end_station_id STRING,
+          start_lat FLOAT64,
+          start_lng FLOAT64,
+          end_lat FLOAT64,
+          end_lng FLOAT64,
+          member_casual STRING,
+          filename STRING
+      )
+      PARTITION BY DATE(started_at);
+
+  - id: bq_citibike_ext
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE OR REPLACE EXTERNAL TABLE `{{ render(vars.ext_table) }}`
+      (
+          ride_id STRING,
+          rideable_type STRING,
+          started_at TIMESTAMP,
+          ended_at TIMESTAMP,
+          start_station_name STRING,
+          start_station_id STRING,
+          end_station_name STRING,
+          end_station_id STRING,
+          start_lat FLOAT64,
+          start_lng FLOAT64,
+          end_lat FLOAT64,
+          end_lng FLOAT64,
+          member_casual STRING
+      )
+      OPTIONS (
+          format = 'CSV',
+          uris = ['{{ render(vars.gcs_folder) }}*.csv'],
+          skip_leading_rows = 1,
+          ignore_unknown_values = TRUE
+      );
+
+  - id: bq_citibike_merge
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      MERGE INTO `{{ render(vars.main_table) }}` T
+      USING (
+        SELECT *, "{{ render(vars.file_prefix) }}.csv" as filename
+        FROM `{{ render(vars.ext_table) }}`
+      ) S
+      ON T.ride_id = S.ride_id
+      WHEN NOT MATCHED THEN
+        INSERT (ride_id, rideable_type, started_at, ended_at, start_station_name, start_station_id, end_station_name, end_station_id, start_lat, start_lng, end_lat, end_lng, member_casual, filename)
+        VALUES (S.ride_id, S.rideable_type, S.started_at, S.ended_at, S.start_station_name, S.start_station_id, S.end_station_name, S.end_station_id, S.start_lat, S.start_lng, S.end_lat, S.end_lng, S.member_casual, S.filename);
+
+  - id: purge_files_success
+    type: io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles
+
+errors:
+  - id: purge_files_on_failure
+    type: io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles
+
+pluginDefaults:
+  - type: io.kestra.plugin.gcp
+    values:
+      serviceAccount: "{{ secret('GCP_SERVICE_ACCOUNT') }}"
+      projectId: "{{ kv('GCP_PROJECT_ID') }}"
+      location: "{{ kv('GCP_LOCATION') }}"
+      bucket: "{{ kv('GCP_BUCKET_NAME') }}"
+
+triggers:
+  - id: monthly_schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 10 1 * *"
