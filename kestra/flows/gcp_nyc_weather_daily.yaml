@@ -1,0 +1,94 @@
+id: gcp_nyc_weather_daily
+namespace: dtc-de-capstone-project
+
+variables:
+  formatted_date: "{{ trigger.date | date('yyyy-MM-dd') }}"
+  gcs_file: "gs://{{ kv('GCP_BUCKET_NAME') }}/weather/nyc_{{ vars.formatted_date }}.csv"
+  main_table: "{{ kv('GCP_PROJECT_ID') }}.{{ kv('GCP_DATASET') }}.nyc_weather_data"
+  ext_table: "{{ kv('GCP_PROJECT_ID') }}.{{ kv('GCP_DATASET') }}.nyc_weather_ext"
+
+tasks:
+  - id: set_labels
+    type: io.kestra.plugin.core.execution.Labels
+    labels:
+      date: "{{ render(vars.formatted_date) }}"
+
+  - id: extract_weather
+    type: io.kestra.plugin.scripts.shell.Commands
+    outputFiles:
+      - "weather.csv"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    commands:
+      - |
+        wget -qO weather.csv "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/40.7128,-74.0060/{{ render(vars.formatted_date) }}/{{ render(vars.formatted_date) }}?unitGroup=us&key={{ secret('VISUAL_CROSSING_API_KEY') }}&contentType=csv&include=days"
+
+  - id: upload_to_gcs
+    type: io.kestra.plugin.gcp.gcs.Upload
+    from: "{{ outputs.extract_weather.outputFiles['weather.csv'] }}"
+    to: "{{ render(vars.gcs_file) }}"
+
+  - id: bq_create_weather_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE TABLE IF NOT EXISTS `{{ render(vars.main_table) }}`
+      (
+          datetime DATE,
+          tempmax FLOAT64,
+          tempmin FLOAT64,
+          temp FLOAT64,
+          precip FLOAT64,
+          snow FLOAT64,
+          snowdepth FLOAT64,
+          windspeed FLOAT64,
+          conditions STRING,
+          description STRING
+      )
+      PARTITION BY datetime;
+
+  - id: bq_weather_ext
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      CREATE OR REPLACE EXTERNAL TABLE `{{ render(vars.ext_table) }}`
+      OPTIONS (
+          format = 'CSV',
+          uris = ['{{ render(vars.gcs_file) }}'],
+          skip_leading_rows = 1
+      );
+
+  - id: bq_load_weather
+    type: io.kestra.plugin.gcp.bigquery.Query
+    sql: |
+      INSERT INTO `{{ render(vars.main_table) }}`
+      SELECT 
+          CAST(datetime AS DATE),
+          CAST(tempmax AS FLOAT64),
+          CAST(tempmin AS FLOAT64),
+          CAST(temp AS FLOAT64),
+          CAST(precip AS FLOAT64),
+          CAST(snow AS FLOAT64),
+          CAST(snowdepth AS FLOAT64),
+          CAST(windspeed AS FLOAT64),
+          conditions,
+          description
+      FROM `{{ render(vars.ext_table) }}`;
+
+  - id: purge_files
+    type: io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles
+
+errors:
+  - id: purge_on_failure
+    type: io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles
+
+pluginDefaults:
+  - type: io.kestra.plugin.gcp
+    values:
+      serviceAccount: "{{ secret('GCP_SERVICE_ACCOUNT') }}"
+      projectId: "{{ kv('GCP_PROJECT_ID') }}"
+      location: "{{ kv('GCP_LOCATION') }}"
+      bucket: "{{ kv('GCP_BUCKET_NAME') }}"
+
+triggers:
+  - id: daily_weather_schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 1 * * *"
