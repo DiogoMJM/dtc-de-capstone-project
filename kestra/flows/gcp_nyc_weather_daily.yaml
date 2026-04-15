@@ -59,19 +59,36 @@ tasks:
   - id: bq_load_weather
     type: io.kestra.plugin.gcp.bigquery.Query
     sql: |
-      INSERT INTO `{{ render(vars.main_table) }}`
-      SELECT 
-          CAST(datetime AS DATE),
-          CAST(tempmax AS FLOAT64),
-          CAST(tempmin AS FLOAT64),
-          CAST(temp AS FLOAT64),
-          CAST(precip AS FLOAT64),
-          CAST(snow AS FLOAT64),
-          CAST(snowdepth AS FLOAT64),
-          CAST(windspeed AS FLOAT64),
-          conditions,
-          description
-      FROM `{{ render(vars.ext_table) }}`;
+      MERGE INTO `{{ render(vars.main_table) }}` T
+      USING (
+        SELECT 
+            CAST(datetime AS DATE) as dt,
+            CAST(tempmax AS FLOAT64) as tmax,
+            CAST(tempmin AS FLOAT64) as tmin,
+            CAST(temp AS FLOAT64) as t,
+            CAST(precip AS FLOAT64) as pr,
+            CAST(snow AS FLOAT64) as sn,
+            CAST(snowdepth AS FLOAT64) as snd,
+            CAST(windspeed AS FLOAT64) as ws,
+            conditions as cond,
+            description as descr
+        FROM `{{ render(vars.ext_table) }}`
+      ) S
+      ON T.datetime = S.dt
+      WHEN MATCHED THEN
+        UPDATE SET 
+          tempmax = S.tmax,
+          tempmin = S.tmin,
+          temp = S.t,
+          precip = S.pr,
+          snow = S.sn,
+          snowdepth = S.snd,
+          windspeed = S.ws,
+          conditions = S.cond,
+          description = S.descr
+      WHEN NOT MATCHED THEN
+        INSERT (datetime, tempmax, tempmin, temp, precip, snow, snowdepth, windspeed, conditions, description)
+        VALUES (S.dt, S.tmax, S.tmin, S.t, S.pr, S.sn, S.snd, S.ws, S.cond, S.descr);
 
   - id: purge_files
     type: io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles
