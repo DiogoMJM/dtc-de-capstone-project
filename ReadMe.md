@@ -6,9 +6,10 @@
 New York City's Citi Bike system generates millions of trip records monthly. However, ridership is heavily influenced by external factors—most notably weather conditions. This project builds an automated end-to-end data pipeline to ingest Citi Bike trip data and local NYC weather data into a Google Cloud-based data warehouse.
 
 The goal is to enable analysts to answer questions like:
-* **How does precipitation impact daily ridership?**
-* **What is the influence of temperature on different types of riders (member vs casual)?**
-* **Which stations remain "hubs" even during inclement weather?**
+* **What is the influence of temperature on trip volume ?**
+* **How does precipitation impact daily ridership ?**
+* **What is the influence of temperature on the different rider profiles ?**
+* **Which stations remain "hubs" even during inclement weather ?**
 
 ## 2. Architecture
 The pipeline follows a modern ELT (Extract, Load, Transform) pattern:
